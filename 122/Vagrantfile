@@ -1,0 +1,75 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = 'generic/ubuntu2204'
+  config.vm.box_check_update = false
+
+  config.vm.provider "virtualbox" do |vb|
+    vb.gui = false
+    vb.memory = "2048"
+  end
+
+  config.vm.provision "install-k3s",
+    type: "shell",
+    env: { 
+      :INSTALL_K3S_SKIP_SELINUX_RPM => 'true'
+    }, 
+    run: 'once', 
+    inline: <<-SHELL
+    curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode=644
+  SHELL
+
+
+  ## Cluster "readiness" checks
+  #
+  # Taken from https://github.com/k3s-io/k3s/blob/master/tests/install/ubuntu-focal/Vagrantfile
+  #
+  config.vm.provision "wait-for-node", type: "shell", run: 'once' do |sh|
+    sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+    sh.inline = <<~SHELL
+      #!/usr/bin/env bash
+      set -eu -o pipefail
+      echo 'Waiting for node to be ready ...'
+      time timeout 300 bash -c 'while ! (kubectl wait --for condition=ready node/$(hostname) 2>/dev/null); do sleep 5; done'
+      kubectl get node,all -A -o wide
+    SHELL
+  end
+
+  config.vm.provision "wait-for-coredns", type: "shell", run: 'once' do |sh|
+    sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+    sh.inline = <<~SHELL
+      #!/usr/bin/env bash
+      set -eu -o pipefail
+      function describe-coredns {
+        RC=$?
+        if [[ $RC -ne 0 ]]; then
+          kubectl describe node
+          kubectl --namespace kube-system describe pod -l k8s-app=kube-dns
+          kubectl --namespace kube-system logs -l k8s-app=kube-dns
+        fi
+        exit $RC
+      }
+      trap describe-coredns EXIT
+      time timeout 300 bash -c 'while ! (kubectl --namespace kube-system rollout status --timeout 10s deploy/coredns 2>/dev/null); do sleep 5; done'
+    SHELL
+  end
+
+  config.vm.provision "wait-for-local-storage", type: "shell", run: 'once' do |sh|
+    sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+    sh.inline = <<~SHELL
+      #!/usr/bin/env bash
+      set -eu -o pipefail
+      time timeout 300 bash -c 'while ! (kubectl --namespace kube-system rollout status --timeout 10s deploy/local-path-provisioner 2>/dev/null); do sleep 5; done'
+    SHELL
+  end
+
+  config.vm.provision "wait-for-traefik", type: "shell", run: 'once' do |sh|
+    sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+    sh.inline = <<~SHELL
+      #!/usr/bin/env bash
+      set -eu -o pipefail
+      time timeout 300 bash -c 'while ! (kubectl --namespace kube-system rollout status --timeout 10s deploy/traefik 2>/dev/null); do sleep 5; done'
+    SHELL
+  end
+end
