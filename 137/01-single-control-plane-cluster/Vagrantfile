@@ -1,0 +1,89 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# For a complete reference, please see the online documentation at
+# https://docs.vagrantup.com.
+
+## Control Plane overrides
+CTRL_PLANE_NAME = "control-plane"
+CTRL_PLANE_IP = "192.168.56.10"
+SHORT_TOKEN = "OAGujpqZ0MJDrBovLINmCQj8WqXjuYh0doYNOOjc3AWa88TbewqAD4RlLj5M3KXa"
+
+## Worker overrides
+WORKER_NAME = "worker"
+WORKER_IP = "192.168.56.11"
+SERVER_TOKEN = "K102e1f51485b108c9b19b54e1aae3c9235e29566e045a9f9a37295e68b5f56bb8a::server:OAGujpqZ0MJDrBovLINmCQj8WqXjuYh0doYNOOjc3AWa88TbewqAD4RlLj5M3KXa"
+
+Vagrant.configure("2") do |config|
+  VM_IMAGE_NAME = 'generic/ubuntu2204'
+
+  ## Control plane
+  config.vm.define CTRL_PLANE_NAME do |node|
+    node.vm.box = VM_IMAGE_NAME
+    node.vm.box_check_update = false
+
+    # Network
+    node.vm.hostname = CTRL_PLANE_NAME
+    node.vm.network "private_network", ip: CTRL_PLANE_IP
+
+    # VirtualBox VM customization
+    node.vm.provider "virtualbox" do |vb|
+      vb.gui = false
+      vb.memory = "2048"
+    end
+
+    node.vm.provision "install-k3s", type: "shell", run: 'once' do |sh|
+      sh.env = { 
+        :INSTALL_K3S_SKIP_SELINUX_RPM => 'true',
+        :K3S_TOKEN => SHORT_TOKEN,
+        :K3S_NODE_NAME => CTRL_PLANE_NAME,
+        :K3S_EXTERNAL_IP => CTRL_PLANE_IP,
+      }
+      sh.inline = <<~SHELL
+        curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode=644 --node-external-ip=#{CTRL_PLANE_IP} --tls-san=#{CTRL_PLANE_IP}
+      SHELL
+    end
+
+    node.vm.provision "wait-ready", type: "shell", run: 'once' do |sh|
+      sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+      sh.inline = <<~SHELL
+        #!/usr/bin/env bash
+        set -eu -o pipefail
+        echo 'Waiting for node to be ready ...'
+        time timeout 300 bash -c 'while ! (kubectl wait --for condition=ready node/$(hostname) 2>/dev/null); do sleep 5; done'
+        kubectl get node,all -A -o wide
+        echo ''
+        cat /var/lib/rancher/k3s/server/node-token
+      SHELL
+    end
+  end
+
+  ## Worker node
+  config.vm.define WORKER_NAME do |node|
+    node.vm.box = VM_IMAGE_NAME
+    node.vm.box_check_update = false
+
+    # Network
+    node.vm.hostname  = WORKER_NAME
+    node.vm.network "private_network", ip: WORKER_IP
+
+    # VirtualBox VM customization
+    node.vm.provider "virtualbox" do |vb|
+      vb.gui = false
+      vb.memory = "2048"
+    end
+
+    node.vm.provision "install-k3s", type: "shell",
+      env: { 
+        :INSTALL_K3S_SKIP_SELINUX_RPM => 'true',
+        :K3S_TOKEN => SERVER_TOKEN,
+        :K3S_NODE_NAME => WORKER_NAME,
+        :K3S_EXTERNAL_IP => WORKER_IP,
+        # Prompts the agent to join the control plane using the token
+        :K3S_URL => "https://#{CTRL_PLANE_IP}:6443", 
+      }, 
+      run: 'once', 
+      inline: <<-SHELL
+      curl -sfL https://get.k3s.io | sh -s - 
+    SHELL
+  end
+end

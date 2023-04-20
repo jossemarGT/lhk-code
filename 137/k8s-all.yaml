@@ -1,0 +1,75 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: lhk
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: echo-app
+  namespace: lhk
+  name: echo-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-app
+  strategy: {}
+  template:
+    metadata:
+      labels:
+        app: echo-app
+    spec:
+      containers:
+      - image: hashicorp/http-echo:0.2.3
+        name: http-echo
+        args:
+        - "-text=Hola"
+        - "-listen=:8080"
+        resources: {} # No hagan esto en casa
+---
+kind: Service
+apiVersion: v1
+metadata:
+  name: echo-service
+  namespace: lhk
+spec:
+  type: ClusterIP
+  selector:
+    app: echo-app
+  ports:
+  - name: http
+    protocol: TCP
+    port: 8080
+    targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-ingress
+  namespace: lhk
+spec:
+  rules:
+    - host: lhk.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name:  echo-service
+                port:
+                  number: 8080
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: whoami-chart
+  namespace: lhk
+spec:
+  repo: https://cowboysysop.github.io/charts/
+  chart: cowboysysop/whoami
+  targetNamespace: lhk
+  valuesContent: |-
+    nameOverride: charlie
