@@ -1,0 +1,138 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+# For a complete reference, please see the online documentation at
+# https://docs.vagrantup.com.
+
+## Control Plane overrides
+CTRL_PLANE_NAME_PREFFIX = "control-plane"
+LEAD_CTRL_PLANE_IP = "192.168.56.20"
+SHORT_TOKEN = "OAGujpqZ0MJDrBovLINmCQj8WqXjuYh0doYNOOjc3AWa88TbewqAD4RlLj5M3KXa"
+
+## Join token
+SERVER_TOKEN = "K10635abac5106a7c1429be8364dc0d1fb38df75b0b0a72963bf5fbbeefaf8b0478::server:OAGujpqZ0MJDrBovLINmCQj8WqXjuYh0doYNOOjc3AWa88TbewqAD4RlLj5M3KXa"
+
+## Worker overrides
+WORKER_NAME = "worker"
+WORKER_IP = "192.168.56.25"
+
+
+Vagrant.configure("2") do |config|
+  VM_IMAGE_NAME = 'generic/ubuntu2204'
+
+  ##
+  ## Lead control plane / etcd
+  ##
+  config.vm.define "#{CTRL_PLANE_NAME_PREFFIX}-0" do |node|
+    node.vm.box = VM_IMAGE_NAME
+    node.vm.box_check_update = false
+
+    # Network
+    node.vm.hostname = "#{CTRL_PLANE_NAME_PREFFIX}-0"
+    node.vm.network "private_network", ip: LEAD_CTRL_PLANE_IP
+
+    # VirtualBox VM customization
+    node.vm.provider "virtualbox" do |vb|
+      vb.gui = false
+      vb.memory = "1792"
+    end
+
+    node.vm.provision "install-k3s", type: "shell", run: 'once' do |sh|
+      sh.env = { 
+        :INSTALL_K3S_SKIP_SELINUX_RPM => 'true',
+        :K3S_TOKEN => SHORT_TOKEN,
+        :K3S_NODE_NAME => "#{CTRL_PLANE_NAME_PREFFIX}-0",
+        :K3S_EXTERNAL_IP => LEAD_CTRL_PLANE_IP,
+      }
+      sh.inline = <<~SHELL
+        # Allow traffic on etcd ports  
+        ufw allow 2380
+        ufw allow 2379
+
+      curl -sfL https://get.k3s.io | sh -s - server --cluster-init --write-kubeconfig-mode=644 --node-ip=#{LEAD_CTRL_PLANE_IP} --tls-san=#{LEAD_CTRL_PLANE_IP} --advertise-address=#{LEAD_CTRL_PLANE_IP} --flannel-iface=eth1
+      SHELL
+    end
+
+    node.vm.provision "wait-ready", type: "shell", run: 'once' do |sh|
+      sh.env = { :PATH => "/usr/local/bin:/usr/local/sbin:/sbin:/bin:/usr/sbin:/usr/bin:/root/bin" }
+      sh.inline = <<~SHELL
+        #!/usr/bin/env bash
+        set -eu -o pipefail
+        echo 'Waiting for node to be ready ...'
+        time timeout 300 bash -c 'while ! (kubectl wait --for condition=ready node/$(hostname) 2>/dev/null); do sleep 5; done'
+        kubectl get node,all -A -o wide
+        echo ''
+        cat /var/lib/rancher/k3s/server/node-token
+      SHELL
+    end
+  end
+
+  ##
+  ## control planes / etcds
+  ##
+  (1..2).each do |i|
+    NODE_IP = "#{LEAD_CTRL_PLANE_IP.chomp('0')}#{i}"
+
+    config.vm.define "#{CTRL_PLANE_NAME_PREFFIX}-#{i}" do |node|
+      node.vm.box = VM_IMAGE_NAME
+      node.vm.box_check_update = false
+
+      # Network
+      node.vm.hostname = "#{CTRL_PLANE_NAME_PREFFIX}-#{i}"
+      node.vm.network "private_network", ip: NODE_IP
+
+      # VirtualBox VM customization
+      node.vm.provider "virtualbox" do |vb|
+        vb.gui = false
+        vb.memory = "1792"
+      end
+
+      node.vm.provision "install-k3s", type: "shell", run: 'once' do |sh|
+        sh.env = { 
+          :INSTALL_K3S_SKIP_SELINUX_RPM => 'true',
+          :K3S_TOKEN => SERVER_TOKEN,
+          :K3S_NODE_NAME => "#{CTRL_PLANE_NAME_PREFFIX}-#{i}",
+          :K3S_EXTERNAL_IP => NODE_IP,
+        }
+        sh.inline = <<~SHELL
+          # Allow traffic on etcd ports  
+          ufw allow 2380
+          ufw allow 2379
+
+          curl -sfL https://get.k3s.io | sh -s - server --server=https://#{LEAD_CTRL_PLANE_IP}:6443 --node-ip=#{NODE_IP} --tls-san=#{NODE_IP} --advertise-address=#{NODE_IP} --flannel-iface=eth1
+        SHELL
+      end
+    end
+  end
+  
+  ##
+  ## Worker node
+  ##
+  config.vm.define WORKER_NAME do |node|
+    node.vm.box = VM_IMAGE_NAME
+    node.vm.box_check_update = false
+
+    # Network
+    node.vm.hostname  = WORKER_NAME
+    node.vm.network "private_network", ip: WORKER_IP
+
+    # VirtualBox VM customization
+    node.vm.provider "virtualbox" do |vb|
+      vb.gui = false
+      vb.memory = "1792"
+    end
+
+    node.vm.provision "install-k3s", type: "shell",
+      env: { 
+        :INSTALL_K3S_SKIP_SELINUX_RPM => 'true',
+        :K3S_TOKEN => SERVER_TOKEN,
+        :K3S_NODE_NAME => WORKER_NAME,
+        :K3S_EXTERNAL_IP => WORKER_IP,
+        # Prompts the agent to join the control plane using the token
+        :K3S_URL => "https://#{LEAD_CTRL_PLANE_IP}:6443", 
+      }, 
+      run: 'once', 
+      inline: <<-SHELL
+      curl -sfL https://get.k3s.io | sh -s - --flannel-iface=eth1
+    SHELL
+  end
+end
